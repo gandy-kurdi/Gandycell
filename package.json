@@ -1,0 +1,7 @@
+{
+  "name": "web-router-app",
+  "version": "1.0.0",
+  "description": "Simple web routing utility for development",
+  "private": true,
+  "license": "MIT"
+}
