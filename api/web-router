@@ -1,0 +1,106 @@
+export const config = {
+  runtime: "edge",
+};
+
+const MYAPP_BASE = (process.env.MYAPP_BASE || "").replace(/\/$/, "");
+
+const REMOVED_HEADERS = new Set([
+  "host",
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+  "forwarded",
+  "x-forwarded-host",
+  "x-forwarded-proto",
+  "x-forwarded-port",
+]);
+
+// Simple in-memory rate limiting (per instance - for better, use Vercel KV)
+const rateLimitMap = new Map();
+const RATE_LIMIT_WINDOW = 60 * 1000; // 60 seconds
+const MAX_REQUESTS = 50; // Adjust as needed
+
+function getClientIP(req) {
+  return req.headers.get('x-forwarded-for') || req.headers.get('x-real-ip') || 'unknown';
+}
+
+function isRateLimited(ip) {
+  const now = Date.now();
+  const key = ip;
+  if (!rateLimitMap.has(key)) {
+    rateLimitMap.set(key, { count: 1, resetTime: now + RATE_LIMIT_WINDOW });
+    return false;
+  }
+  const record = rateLimitMap.get(key);
+  if (now > record.resetTime) {
+    record.count = 1;
+    record.resetTime = now + RATE_LIMIT_WINDOW;
+    return false;
+  }
+  if (record.count >= MAX_REQUESTS) {
+    return true;
+  }
+  record.count++;
+  return false;
+}
+
+export default async function webRouterHandler(req) {
+  if (!MYAPP_BASE) {
+    return new Response("Configuration error: MYAPP_BASE not defined", { status: 500 });
+  }
+
+  const clientIP = getClientIP(req);
+  if (isRateLimited(clientIP)) {
+    return new Response("Too many requests. Please try again later.", { status: 429 });
+  }
+
+  try {
+    const url = new URL(req.url);
+    const targetPath = MYAPP_BASE + url.pathname + url.search;
+
+    const forwardHeaders = new Headers();
+    let userOrigin = null;
+    for (const [key, value] of req.headers) {
+      const headerKey = key.toLowerCase();
+      if (REMOVED_HEADERS.has(headerKey)) continue;
+      if (headerKey.startsWith("x-vercel-")) continue;
+      if (headerKey === "x-real-ip") { userOrigin = value; continue; }
+      if (headerKey === "x-forwarded-for") { if (!userOrigin) userOrigin = value; continue; }
+      forwardHeaders.set(key, value);
+    }
+    if (userOrigin) forwardHeaders.set("x-forwarded-for", userOrigin);
+
+    const requestMethod = req.method;
+    const bodyExists = requestMethod !== "GET" && requestMethod !== "HEAD";
+
+    const requestOptions = {
+      method: requestMethod,
+      headers: forwardHeaders,
+      redirect: "manual",
+    };
+    if (bodyExists) {
+      requestOptions.body = req.body;
+      requestOptions.duplex = "half";
+    }
+
+    const responseFromRemote = await fetch(targetPath, requestOptions);
+
+    const responseHeaders = new Headers();
+    for (const [k, v] of responseFromRemote.headers) {
+      if (k.toLowerCase() === "transfer-encoding") continue;
+      responseHeaders.set(k, v);
+    }
+
+    return new Response(responseFromRemote.body, {
+      status: responseFromRemote.status,
+      headers: responseHeaders,
+    });
+  } catch (err) {
+    return new Response("Service unavailable: Connection issue", { status: 502 });
+  }
+}
