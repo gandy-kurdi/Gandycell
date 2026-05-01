@@ -1,0 +1,8 @@
+{
+  "version": 2,
+  "name": "web-router-app",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/api/web-router" }
+  ],
+  "trailingSlash": false
+}
